@@ -1,0 +1,139 @@
+name: Wayne(小米6X) Droidspaces 4.19 非 GKI 内核
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build:
+    name: Build wayne droidspaces kernel
+    runs-on: ubuntu-latest
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: 环境变量配置
+      run: |
+        ENV_FILE=config-wayne-droidspaces.env
+        grep -E '^KERNEL_SOURCE=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^KERNEL_SOURCE_BRANCH=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^KERNEL_CONFIG=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^KERNEL_IMAGE_NAME=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^LLVM_CONFIG=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^ENABLE_DROIDSPACES=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^ENABLE_DROIDSPACES_PATCH=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^ENABLE_UFW_FAIL2BAN=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^ENABLE_KVM=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^NEED_DTBO=' $ENV_FILE >> $GITHUB_ENV
+        BASE_ZIP=$(grep -E '^KERNEL_ZIP_NAME=' $ENV_FILE | cut -d= -f2-)
+        echo "KERNEL_ZIP_NAME=${BASE_ZIP}_$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
+
+    - name: 构建编译内核环境
+      run: |
+        sudo apt-get update
+        sudo -E apt-get -y -qq install git make bc bison ccache openssl zip kmod cpio flex libelf-dev curl libssl-dev libtfm-dev wget device-tree-compiler ca-certificates python3 binutils binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+
+    - name: 下载谷歌clang12编译器
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        mkdir clang-aosp
+        git clone -q --depth=1 --single-branch https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android12-release clang-aosp
+
+    - name: 下载内核源码
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth=1
+
+    - name: 定位 defconfig
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        if [ -f "android-kernel/arch/arm64/configs/vendor/${{ env.KERNEL_CONFIG }}" ]; then
+          echo "DEFCONFIG_PATH=android-kernel/arch/arm64/configs/vendor/${{ env.KERNEL_CONFIG }}" >> $GITHUB_ENV
+          echo "DEFCONFIG_TARGET=vendor/${{ env.KERNEL_CONFIG }}" >> $GITHUB_ENV
+        else
+          echo "DEFCONFIG_PATH=android-kernel/arch/arm64/configs/${{ env.KERNEL_CONFIG }}" >> $GITHUB_ENV
+          echo "DEFCONFIG_TARGET=${{ env.KERNEL_CONFIG }}" >> $GITHUB_ENV
+        fi
+
+    - name: 写入 Droidspaces 配置
+      if: env.ENABLE_DROIDSPACES == 'true'
+      run: |
+        chmod +x scripts/add-droidspaces-config.sh
+        ./scripts/add-droidspaces-config.sh \
+          "$GITHUB_WORKSPACE/kernel_workspace/${{ env.DEFCONFIG_PATH }}" \
+          "${{ env.ENABLE_UFW_FAIL2BAN }}"
+
+    - name: 应用 Droidspaces 非 GKI 补丁
+      if: env.ENABLE_DROIDSPACES_PATCH == 'true'
+      run: |
+        chmod +x scripts/apply-droidspaces-patches.sh
+        ./scripts/apply-droidspaces-patches.sh \
+          "$GITHUB_WORKSPACE/kernel_workspace/android-kernel" \
+          "$GITHUB_WORKSPACE/patches"
+
+    - name: 开启kvm
+      if: env.ENABLE_KVM == 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        echo "CONFIG_VIRTUALIZATION=y" >> ${{ env.DEFCONFIG_PATH }}
+        echo "CONFIG_KVM=y" >> ${{ env.DEFCONFIG_PATH }}
+        echo "CONFIG_VHOST_NET=y" >> ${{ env.DEFCONFIG_PATH }}
+        echo "CONFIG_VHOST_CROSS_ENDIAN_LEGACY=y" >> ${{ env.DEFCONFIG_PATH }}
+
+    - name: 设置ccache缓存
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: build-kernel-wayne-droidspaces-4.19
+        max-size: 2G
+
+    - name: 生成 .config
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/clang-r416183b/bin:$PATH
+        make O=out ARCH=arm64 ${{ env.DEFCONFIG_TARGET }}
+
+    - name: 开始编译内核
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/clang-r416183b/bin:$PATH
+        export KBUILD_BUILD_USER=wayne
+        export KBUILD_BUILD_HOST=droidspaces
+        if [ "${{ env.LLVM_CONFIG }}" = "y" ]; then
+          make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" \
+            CROSS_COMPILE="aarch64-linux-gnu-" CROSS_COMPILE_ARM32="arm-linux-gnueabi-" \
+            LLVM=1 LLVM_IAS=1
+        else
+          make -j$(nproc --all) O=out ARCH=arm64 CC="ccache clang" \
+            CROSS_COMPILE="aarch64-linux-gnu-" CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
+        fi
+
+    - name: 准备打包内核
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=/dev/block/bootdevice/by-name/boot;!g' AnyKernel3/anykernel.sh
+        sed -i 's/is_slot_device=1;/is_slot_device=0;/g' AnyKernel3/anykernel.sh
+        cp android-kernel/out/arch/arm64/boot/${{ env.KERNEL_IMAGE_NAME }} AnyKernel3/
+        if [ "${{ env.NEED_DTBO }}" = "true" ] && [ -f android-kernel/out/arch/arm64/boot/dtbo.img ]; then
+          cp android-kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/
+        fi
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        rm -rf AnyKernel3/ramdisk AnyKernel3/modules AnyKernel3/patch
+        zip -r9 ${{ env.KERNEL_ZIP_NAME }}.zip AnyKernel3/*
+
+    - name: 上传 Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.KERNEL_ZIP_NAME }}
+        path: kernel_workspace/${{ env.KERNEL_ZIP_NAME }}.zip
+
+    - name: 发布到 Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: kernel_workspace/${{ env.KERNEL_ZIP_NAME }}.zip
