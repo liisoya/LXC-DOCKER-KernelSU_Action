@@ -69,6 +69,60 @@ if [ "$ENABLE_KSU" != "true" ]; then
   log "[ksu] ENABLE_KSU=false: 禁用 CONFIG_KSU(隔离测试模式, 无 root)"
   set_disabled CONFIG_KSU
   set_disabled CONFIG_KSU_MANUAL_HOOK
+
+  # ---- 修复 5: 给源码树所有未守卫的 ksu_handle_* 调用点加 CONFIG_KSU 守卫 ----
+  # 团队集成时未加守卫, KSU=n 时 vmlinux 链接报 8 个 undefined symbol。
+  # 只包调用语句, 不动 extern 声明(声明本身不产生符号引用)。
+  python3 - "$KERNEL_DIR" <<'PYEOF'
+import re, sys
+
+kernel_dir = sys.argv[1]
+files = [
+    "kernel/sys.c", "kernel/reboot.c",
+    "fs/open.c", "fs/read_write.c", "fs/stat.c", "fs/exec.c",
+    "drivers/input/input.c",
+]
+GUARD = "#if IS_ENABLED(CONFIG_KSU)"
+call_re = re.compile(r"^\s*(\(void\)\s*)?ksu_handle_\w+\(")
+total = 0
+
+for rel in files:
+    path = kernel_dir + "/" + rel
+    try:
+        lines = open(path, encoding="utf-8", errors="surrogateescape").read().split("\n")
+    except FileNotFoundError:
+        print("skip(不存在):", rel)
+        continue
+    out, i, count = [], 0, 0
+    while i < len(lines):
+        line = lines[i]
+        prev = out[-1].strip() if out else ""
+        if ("ksu_handle_" in line and call_re.match(line)
+                and prev != GUARD):
+            stmt = [line]
+            # 多行语句: 收集到以 ; 结尾的行为止
+            while not stmt[-1].rstrip().endswith(";") and i + 1 < len(lines):
+                i += 1
+                stmt.append(lines[i])
+            out.append(GUARD)
+            out.extend(stmt)
+            out.append("#endif")
+            count += 1
+        else:
+            out.append(line)
+        i += 1
+    if count:
+        open(path, "w", encoding="utf-8", errors="surrogateescape").write("\n".join(out))
+        print("guarded %2d calls in %s" % (count, rel))
+        total += count
+    else:
+        print("no unguarded calls:", rel)
+
+print("total guarded:", total)
+if total == 0:
+    print("本次无新增守卫(可能已全部守卫过)")
+PYEOF
+  log "[ksu] 全部 ksu_handle_* 调用点已加 CONFIG_KSU 守卫"
 elif [ ! -d "$KSU_DIR" ]; then
   log "[ksu] 未找到 drivers/kernelsu(子模块未初始化?), 跳过 KSU 修复"
 else
