@@ -69,6 +69,14 @@ jobs:
           echo "DEFCONFIG_TARGET=${{ env.KERNEL_CONFIG }}" >> $GITHUB_ENV
         fi
 
+    - name: 应用源码树定点修复
+      # br_private.h 补回被删成员 + ReSukiSU 启用非 GKI 必需的 manual hook
+      run: |
+        chmod +x scripts/kernel-fix/apply-kernel-fixes.sh
+        ./scripts/kernel-fix/apply-kernel-fixes.sh \
+          "$GITHUB_WORKSPACE/kernel_workspace/android-kernel" \
+          "$GITHUB_WORKSPACE/kernel_workspace/${{ env.DEFCONFIG_PATH }}"
+
     - name: 写入 Droidspaces 配置
       if: env.ENABLE_DROIDSPACES == 'true'
       run: |
