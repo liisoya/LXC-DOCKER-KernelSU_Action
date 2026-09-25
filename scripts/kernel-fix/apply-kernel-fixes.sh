@@ -47,4 +47,46 @@ else
     echo "错误: 未提供 defconfig 路径, 无法启用 manual hook" >&2
     exit 1
   fi
+
+  # ---- 修复 3: fs/stat.c 缺失的 ksu_handle_newfstat_ret hook ----
+  # manual_hook_check.mk 强制要求, 源码树集成时遗漏了这一处。
+  # 按 ReSukiSU 官方文档(resukisu.github.io/guide/manual-integrate.html):
+  #   声明加在 ksu_handle_stat 声明之后,
+  #   调用加在 SYSCALL_DEFINE2(newfstat,...) 的 cp_new_stat 之后、return 之前。
+  STAT_C="$KERNEL_DIR/fs/stat.c"
+  if [ ! -f "$STAT_C" ]; then
+    log "[ksu] 未找到 fs/stat.c, 跳过"
+  elif grep -q "ksu_handle_newfstat_ret" "$STAT_C"; then
+    log "[ksu] fs/stat.c 已含 ksu_handle_newfstat_ret, 跳过"
+  else
+    python3 - "$STAT_C" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding="utf-8", errors="surrogateescape").read()
+
+decl_anchor = "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);"
+if src.count(decl_anchor) != 1:
+    sys.exit(1)
+decl_new = decl_anchor + \
+    "\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);"
+src = src.replace(decl_anchor, decl_new, 1)
+
+func_anchor = "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)"
+if src.count(func_anchor) != 1:
+    sys.exit(1)
+head, rest = src.split(func_anchor, 1)
+ret_anchor = "\n\treturn error;\n}"
+if rest.count(ret_anchor) < 1:
+    sys.exit(1)
+call_block = ("\n#ifdef CONFIG_KSU_MANUAL_HOOK"
+              "\n\tksu_handle_newfstat_ret(&fd, &statbuf);"
+              "\n#endif")
+rest = rest.replace(ret_anchor, call_block + ret_anchor, 1)
+open(path, "w", encoding="utf-8", errors="surrogateescape").write(head + func_anchor + rest)
+PYEOF
+    grep -q "ksu_handle_newfstat_ret" "$STAT_C" \
+      || { echo "错误: fs/stat.c hook 插入失败" >&2; exit 1; }
+    log "[ksu] 已在 fs/stat.c 集成 ksu_handle_newfstat_ret hook"
+  fi
 fi
