@@ -47,7 +47,13 @@ set_opt CONFIG_SECCOMP_FILTER y
 set_opt CONFIG_CGROUPS y
 set_opt CONFIG_CGROUP_DEVICE y
 set_opt CONFIG_CGROUP_PIDS y
-set_opt CONFIG_MEMCG y
+# 注意: 不启用 CONFIG_MEMCG!
+# 原因: Sukisu 分支 mm/vmscan.c 含未完成的 shrinker rwsem->rwlock 优化补丁,
+# MEMCG_KMEM=y 时会引用不存在的 shrinker_rwsem 导致编译失败。
+# MEMCG 仅影响 Docker 内存限额(docker -m), Droidspaces 需求检查不依赖它,
+# 原始 wayne-perf_defconfig 也未启用, 与原内核行为保持一致。
+set_disabled CONFIG_MEMCG
+set_disabled CONFIG_MEMCG_KMEM
 set_opt CONFIG_CGROUP_SCHED y
 set_opt CONFIG_FAIR_GROUP_SCHED y
 set_opt CONFIG_CGROUP_FREEZER y
