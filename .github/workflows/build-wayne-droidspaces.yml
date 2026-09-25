@@ -38,11 +38,15 @@ jobs:
         sudo -E apt-get -y -qq install git make bc bison ccache openssl zip kmod cpio flex libelf-dev curl libssl-dev libtfm-dev wget device-tree-compiler ca-certificates python3 binutils binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-    - name: 下载谷歌clang12编译器
+    - name: 下载 ZyC clang 20 编译器
+      # 原 clang12(r416183b, 2021) 构建的 vDSO gettimeofday 在 wayne+MIUI 上
+      # 不工作, 导致 vendor 服务被 seccomp 杀死而卡开机。
+      # 原版 LKGeek 内核使用 Android clang 20.0.0(r547379), 改用同代工具链。
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        mkdir clang-aosp
-        git clone -q --depth=1 --single-branch https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android12-release clang-aosp
+        mkdir clang-zyc
+        wget -q https://github.com/ZyCromerZ/Clang/releases/download/20.0.0git-20250129-release/Clang-20.0.0git-20250129.tar.gz
+        tar -C clang-zyc/ -zxf Clang-20.0.0git-20250129.tar.gz
 
     - name: 下载内核源码（含 KernelSU 子模块）
       run: |
@@ -113,13 +117,13 @@ jobs:
     - name: 生成 .config
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/clang-r416183b/bin:$PATH
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-zyc/bin:$PATH
         make O=out ARCH=arm64 ${{ env.DEFCONFIG_TARGET }}
 
     - name: 开始编译内核
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/clang-r416183b/bin:$PATH
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-zyc/bin:$PATH
         export KBUILD_BUILD_USER=wayne
         export KBUILD_BUILD_HOST=droidspaces
         if [ "${{ env.LLVM_CONFIG }}" = "y" ]; then
