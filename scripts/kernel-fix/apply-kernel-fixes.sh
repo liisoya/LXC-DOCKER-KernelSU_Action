@@ -56,37 +56,64 @@ else
   STAT_C="$KERNEL_DIR/fs/stat.c"
   if [ ! -f "$STAT_C" ]; then
     log "[ksu] 未找到 fs/stat.c, 跳过"
-  elif grep -q "ksu_handle_newfstat_ret" "$STAT_C"; then
-    log "[ksu] fs/stat.c 已含 ksu_handle_newfstat_ret, 跳过"
   else
     python3 - "$STAT_C" <<'PYEOF'
 import sys
 
 path = sys.argv[1]
 src = open(path, encoding="utf-8", errors="surrogateescape").read()
+changed = []
 
-decl_anchor = "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);"
-if src.count(decl_anchor) != 1:
-    sys.exit(1)
-decl_new = decl_anchor + \
-    "\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);"
-src = src.replace(decl_anchor, decl_new, 1)
+# ---- hook 1: ksu_handle_newfstat_ret (SYSCALL_DEFINE2(newfstat) 返回值) ----
+if "ksu_handle_newfstat_ret" not in src:
+    decl_anchor = "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);"
+    assert src.count(decl_anchor) == 1, "stat.c 声明锚点异常"
+    src = src.replace(decl_anchor, decl_anchor +
+        "\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);", 1)
 
-func_anchor = "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)"
-if src.count(func_anchor) != 1:
-    sys.exit(1)
-head, rest = src.split(func_anchor, 1)
-ret_anchor = "\n\treturn error;\n}"
-if rest.count(ret_anchor) < 1:
-    sys.exit(1)
-call_block = ("\n#ifdef CONFIG_KSU_MANUAL_HOOK"
-              "\n\tksu_handle_newfstat_ret(&fd, &statbuf);"
-              "\n#endif")
-rest = rest.replace(ret_anchor, call_block + ret_anchor, 1)
-open(path, "w", encoding="utf-8", errors="surrogateescape").write(head + func_anchor + rest)
+    func_anchor = "SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)"
+    assert src.count(func_anchor) == 1, "stat.c newfstat 锚点异常"
+    head, rest = src.split(func_anchor, 1)
+    ret_anchor = "\n\treturn error;\n}"
+    assert ret_anchor in rest, "stat.c newfstat return 锚点缺失"
+    rest = rest.replace(ret_anchor,
+        "\n#ifdef CONFIG_KSU_MANUAL_HOOK"
+        "\n\tksu_handle_newfstat_ret(&fd, &statbuf);"
+        "\n#endif" + ret_anchor, 1)
+    src = head + func_anchor + rest
+    changed.append("ksu_handle_newfstat_ret")
+
+# ---- hook 2: ksu_handle_fstat64_ret (SYSCALL_DEFINE2(fstat64) 返回值, 32 位 su) ----
+if "ksu_handle_fstat64_ret" not in src:
+    decl_anchor2 = "extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);"
+    assert src.count(decl_anchor2) == 1, "stat.c 声明锚点2异常"
+    src = src.replace(decl_anchor2, decl_anchor2 +
+        "\n#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)"
+        "\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);"
+        "\n#endif", 1)
+
+    func_anchor2 = "SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)"
+    assert src.count(func_anchor2) == 1, "stat.c fstat64 锚点异常"
+    head2, rest2 = src.split(func_anchor2, 1)
+    ret2_anchor = "\n\t\terror = cp_new_stat64(&stat, statbuf);\n\n\treturn error;"
+    assert ret2_anchor in rest2, "stat.c fstat64 return 锚点缺失"
+    rest2 = rest2.replace(ret2_anchor,
+        "\n\t\terror = cp_new_stat64(&stat, statbuf);"
+        "\n\n#ifdef CONFIG_KSU_MANUAL_HOOK"
+        "\n\tksu_handle_fstat64_ret(&fd, &statbuf);"
+        "\n#endif\n\treturn error;", 1)
+    src = head2 + func_anchor2 + rest2
+    changed.append("ksu_handle_fstat64_ret")
+
+if changed:
+    open(path, "w", encoding="utf-8", errors="surrogateescape").write(src)
+    print("inserted: " + ", ".join(changed))
+else:
+    print("already integrated")
 PYEOF
     grep -q "ksu_handle_newfstat_ret" "$STAT_C" \
+      && grep -q "ksu_handle_fstat64_ret" "$STAT_C" \
       || { echo "错误: fs/stat.c hook 插入失败" >&2; exit 1; }
-    log "[ksu] 已在 fs/stat.c 集成 ksu_handle_newfstat_ret hook"
+    log "[ksu] fs/stat.c 的 newfstat_ret/fstat64_ret hook 已就位"
   fi
 fi
