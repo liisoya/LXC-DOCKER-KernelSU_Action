@@ -43,10 +43,20 @@ jobs:
         mkdir clang-aosp
         git clone -q --depth=1 --single-branch https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android12-release clang-aosp
 
-    - name: 下载内核源码
+    - name: 下载内核源码（含 KernelSU 子模块）
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth=1
+        git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth=1 --recurse-submodules --shallow-submodules
+
+    - name: 修复源码树的 gcc-version.sh
+      # Sukisu 分支的 gcc-version.sh 被错误地包了子 shell ( )，
+      # 导致 MAJOR/MINOR 赋值丢失，$(shell,...) 宏展开为空，
+      # Kconfig 解析 init/Kconfig:33 报 syntax error。
+      # 用上游 v4.19 原版覆盖。
+      run: |
+        cp scripts/kernel-fix/gcc-version.sh \
+           $GITHUB_WORKSPACE/kernel_workspace/android-kernel/scripts/gcc-version.sh
+        chmod +x $GITHUB_WORKSPACE/kernel_workspace/android-kernel/scripts/gcc-version.sh
 
     - name: 定位 defconfig
       run: |
