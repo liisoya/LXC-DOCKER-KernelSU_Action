@@ -116,4 +116,29 @@ PYEOF
       || { echo "错误: fs/stat.c hook 插入失败" >&2; exit 1; }
     log "[ksu] fs/stat.c 的 newfstat_ret/fstat64_ret hook 已就位"
   fi
+
+  # ---- 修复 4: fs/stat.c 的 ksu_handle_vfs_fstat 引用缺守卫 ----
+  # 定义在 KernelSU 内受 CONFIG_KSU_SUSFS 守卫, 而引用处未加守卫,
+  # SUSFS=n 时链接报 undefined symbol。按定义方守卫包住引用。
+  python3 - "$STAT_C" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding="utf-8", errors="surrogateescape").read()
+
+if "#ifdef CONFIG_KSU_SUSFS\nextern void ksu_handle_vfs_fstat" in src:
+    print("vfs_fstat guard already present")
+else:
+    a1 = "extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);"
+    assert src.count(a1) == 1, "vfs_fstat 声明锚点异常"
+    src = src.replace(a1,
+        "#ifdef CONFIG_KSU_SUSFS\n" + a1 + "\n#endif", 1)
+    a2 = "\t\tksu_handle_vfs_fstat(fd, &stat->size);"
+    assert src.count(a2) == 1, "vfs_fstat 调用锚点异常"
+    src = src.replace(a2,
+        "#ifdef CONFIG_KSU_SUSFS\n" + a2 + "\n#endif", 1)
+    open(path, "w", encoding="utf-8", errors="surrogateescape").write(src)
+    print("vfs_fstat guard added")
+PYEOF
+  log "[ksu] fs/stat.c 的 vfs_fstat 引用已加 SUSFS 守卫"
 fi
