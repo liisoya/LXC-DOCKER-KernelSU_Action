@@ -28,6 +28,7 @@ jobs:
         grep -E '^ENABLE_UFW_FAIL2BAN=' $ENV_FILE >> $GITHUB_ENV
         grep -E '^ENABLE_KVM=' $ENV_FILE >> $GITHUB_ENV
         grep -E '^NEED_DTBO=' $ENV_FILE >> $GITHUB_ENV
+        grep -E '^ENABLE_KSU=' $ENV_FILE >> $GITHUB_ENV
         BASE_ZIP=$(grep -E '^KERNEL_ZIP_NAME=' $ENV_FILE | cut -d= -f2-)
         echo "KERNEL_ZIP_NAME=${BASE_ZIP}_$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
 
@@ -70,12 +71,13 @@ jobs:
         fi
 
     - name: 应用源码树定点修复
-      # br_private.h 补回被删成员 + ReSukiSU 启用非 GKI 必需的 manual hook
+      # gcc-version.sh/bridge/KSU hook 等累积修复; ENABLE_KSU=false 时禁用 KSU 做隔离测试
       run: |
         chmod +x scripts/kernel-fix/apply-kernel-fixes.sh
         ./scripts/kernel-fix/apply-kernel-fixes.sh \
           "$GITHUB_WORKSPACE/kernel_workspace/android-kernel" \
-          "$GITHUB_WORKSPACE/kernel_workspace/${{ env.DEFCONFIG_PATH }}"
+          "$GITHUB_WORKSPACE/kernel_workspace/${{ env.DEFCONFIG_PATH }}" \
+          "${{ env.ENABLE_KSU }}"
 
     - name: 写入 Droidspaces 配置
       if: env.ENABLE_DROIDSPACES == 'true'
@@ -142,7 +144,9 @@ jobs:
         fi
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
         rm -rf AnyKernel3/ramdisk AnyKernel3/modules AnyKernel3/patch
-        zip -r9 ${{ env.KERNEL_ZIP_NAME }}.zip AnyKernel3/*
+        # 注意: 必须在 AnyKernel3 目录内打包, 使 META-INF 位于 zip 根目录,
+        # 否则 TWRP 报"无效的 Zip 文件"
+        cd AnyKernel3 && zip -r9 ../${{ env.KERNEL_ZIP_NAME }}.zip . && cd ..
 
     - name: 上传 Artifact
       uses: actions/upload-artifact@v4

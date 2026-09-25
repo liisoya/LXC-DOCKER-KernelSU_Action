@@ -1,15 +1,45 @@
 #!/usr/bin/env bash
-# 针对本源码树(Sukisu 分支)的定点修复, 在克隆后、生成 .config 前执行
-# 1) 补回 net/bridge/br_private.h 被误删的 nf_call_* 成员
-#    (CONFIG_BRIDGE_NETFILTER=y 时 br_netlink.c/br_netfilter_hooks.c 引用它们)
-# 2) ReSukiSU 非 GKI 内核必须使用 manual hook 模式
-#    (默认的 tracepoint hook 仅支持 GKI 2.0, Kbuild 会直接报错)
+# 针对本源码树(LKGeek_sdm660 各分支通用)的定点修复, 在克隆后、生成 .config 前执行
+# 累积经验清单(全部幂等, 按需自动跳过):
+#   0) 启用 pstore ramoops, 失败时可在 TWRP 抓取内核 panic 日志
+#   1) 补回 net/bridge/br_private.h 被误删的 nf_call_* 成员
+#   2) KSU: 非 GKI 必须 manual hook; ENABLE_KSU=false 时整体禁用 KSU(用于隔离测试)
+#   3) fs/stat.c 补齐 newfstat_ret/fstat64_ret hook(manual_hook_check 强制要求)
+#   4) fs/stat.c 的 vfs_fstat 引用补 CONFIG_KSU_SUSFS 守卫
+#   5) scripts/gcc-version.sh 修复由 workflow 单独步骤完成(上游 v4.19 原版覆盖)
+#
+# 用法: apply-kernel-fixes.sh <内核源码目录> <defconfig路径> [ENABLE_KSU: true|false]
 set -euo pipefail
 
-KERNEL_DIR="${1:?用法: $0 <内核源码目录> <defconfig路径>}"
+KERNEL_DIR="${1:?用法: $0 <内核源码目录> <defconfig路径> [ENABLE_KSU]}"
 DEFCONFIG="${2:-}"
+ENABLE_KSU="${3:-true}"
 
 log() { echo "==> $*"; }
+
+# 追加/清理 defconfig 中单个 CONFIG 选项(幂等)
+set_opt() {
+  local key="$1" val="$2"
+  [ -n "$DEFCONFIG" ] && [ -f "$DEFCONFIG" ] || { echo "错误: defconfig 不可用" >&2; exit 1; }
+  sed -i "/^\(# \)\?${key}[= ]/d" "$DEFCONFIG"
+  printf '%s=%s\n' "$key" "$val" >> "$DEFCONFIG"
+}
+
+set_disabled() {
+  local key="$1"
+  [ -n "$DEFCONFIG" ] && [ -f "$DEFCONFIG" ] || { echo "错误: defconfig 不可用" >&2; exit 1; }
+  sed -i "/^\(# \)\?${key}[= ]/d" "$DEFCONFIG"
+  printf '# %s is not set\n' "$key" >> "$DEFCONFIG"
+}
+
+# ---- 修复 0: pstore ramoops(诊断用, 记录 panic 日志) ----
+if [ -f "$KERNEL_DIR/fs/pstore/Kconfig" ] || [ -f "$KERNEL_DIR/fs/pstore/ram.c" ]; then
+  set_opt CONFIG_PSTORE y
+  set_opt CONFIG_PSTORE_RAM y
+  log "[pstore] 已启用 CONFIG_PSTORE/CONFIG_PSTORE_RAM"
+else
+  log "[pstore] 源码无 pstore, 跳过"
+fi
 
 # ---- 修复 1: br_private.h nf_call_* 成员 ----
 BR_H="$KERNEL_DIR/net/bridge/br_private.h"
@@ -33,26 +63,26 @@ else
   fi
 fi
 
-# ---- 修复 2: ReSukiSU manual hook (非 GKI 必须) ----
+# ---- 修复 2/3/4: ReSukiSU 相关(ENABLE_KSU=false 时整体跳过并禁用 KSU) ----
 KSU_DIR="$KERNEL_DIR/drivers/kernelsu"
-if [ ! -d "$KSU_DIR" ]; then
-  log "[ksu] 未找到 drivers/kernelsu, 跳过"
+if [ "$ENABLE_KSU" != "true" ]; then
+  log "[ksu] ENABLE_KSU=false: 禁用 CONFIG_KSU(隔离测试模式, 无 root)"
+  set_disabled CONFIG_KSU
+  set_disabled CONFIG_KSU_MANUAL_HOOK
+elif [ ! -d "$KSU_DIR" ]; then
+  log "[ksu] 未找到 drivers/kernelsu(子模块未初始化?), 跳过 KSU 修复"
 else
   log "[ksu] 检测到 ReSukiSU, 启用 CONFIG_KSU_MANUAL_HOOK (非 GKI 必须)"
-  if [ -n "$DEFCONFIG" ] && [ -f "$DEFCONFIG" ]; then
-    sed -i "/^\(# \)\?CONFIG_KSU_MANUAL_HOOK[= ]/d" "$DEFCONFIG"
-    echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$DEFCONFIG"
-    log "[ksu] 已写入 CONFIG_KSU_MANUAL_HOOK=y 到 defconfig"
-  else
-    echo "错误: 未提供 defconfig 路径, 无法启用 manual hook" >&2
-    exit 1
-  fi
+  sed -i "/^\(# \)\?CONFIG_KSU_MANUAL_HOOK[= ]/d" "$DEFCONFIG"
+  echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$DEFCONFIG"
+  log "[ksu] 已写入 CONFIG_KSU_MANUAL_HOOK=y 到 defconfig"
 
-  # ---- 修复 3: fs/stat.c 缺失的 ksu_handle_newfstat_ret hook ----
-  # manual_hook_check.mk 强制要求, 源码树集成时遗漏了这一处。
+  # ---- 修复 3: fs/stat.c 缺失的 ksu_handle_newfstat_ret/fstat64_ret hook ----
+  # manual_hook_check.mk 强制要求, 源码树集成时遗漏。
   # 按 ReSukiSU 官方文档(resukisu.github.io/guide/manual-integrate.html):
   #   声明加在 ksu_handle_stat 声明之后,
-  #   调用加在 SYSCALL_DEFINE2(newfstat,...) 的 cp_new_stat 之后、return 之前。
+  #   调用分别加在 SYSCALL_DEFINE2(newfstat) / SYSCALL_DEFINE2(fstat64) 的
+  #   cp_new_stat(64) 之后、return 之前, 受 CONFIG_KSU_MANUAL_HOOK 守卫。
   STAT_C="$KERNEL_DIR/fs/stat.c"
   if [ ! -f "$STAT_C" ]; then
     log "[ksu] 未找到 fs/stat.c, 跳过"
@@ -142,3 +172,5 @@ else:
 PYEOF
   log "[ksu] fs/stat.c 的 vfs_fstat 引用已加 SUSFS 守卫"
 fi
+
+log "全部定点修复完成"
